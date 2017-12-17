@@ -1,4 +1,4 @@
-"""Training script for the WaveNet network on the VCTK corpus.
+"""Trainig script for the WaveNet network on the VCTK corpus.
 
 This script trains a network with the WaveNet using data from the VCTK corpus,
 which can be freely downloaded at the following site (~10 GB):
@@ -19,7 +19,7 @@ import tensorflow as tf
 from tensorflow.python.client import timeline
 
 from wavenet import WaveNetModel, optimizer_factory
-from wavenet.midi_reader import MidiReader
+from wavenet.midi_reader import MidiReader, load_all_audio
 from wavenet.params import loadParams
 
 BATCH_SIZE = 1
@@ -28,18 +28,18 @@ LOGDIR_ROOT = './logdir'
 CHECKPOINT_EVERY = 500
 NUM_STEPS = int(1e5)
 LEARNING_RATE = 1e-3
-MAX_DILATION_POW  = 7;
-EXPANSION_REPS = 3;
-DIL_CHAN = 16;
-RES_CHAN = 16;
-SKIP_CHAN = 16;
+MAX_DILATION_POW  = 3;
+EXPANSION_REPS = 2;
+DIL_CHAN = 32;
+RES_CHAN = 32;
+SKIP_CHAN = 32;
 STARTED_DATESTRING = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
 SAMPLE_SIZE = 100000
 L2_REGULARIZATION_STRENGTH = 0
 EPSILON = 0.001
 MOMENTUM = 0.9
 MAX_TO_KEEP = 5
-METADATA = False
+METADATA = True
 
 
 def get_arguments():
@@ -242,19 +242,6 @@ def main():
                                                                    wavenet_params["initial_filter_width"]),
             sample_size=args.sample_size)
         train_batch = train_reader.dequeue(args.batch_size)
-        # data queue for the validation set
-        #valid_dir = data_dir + 'valid/';
-        #valid_reader = MidiReader(
-        #    valid_dir,
-        #    coord,
-        #    sample_rate=wavenet_params['sample_rate'],
-        #    gc_enabled=gc_enabled,
-        #    receptive_field=WaveNetModel.calculate_receptive_field(wavenet_params["filter_width"],
-        #                                                           wavenet_params["dilations"],
-        #                                                           wavenet_params["scalar_input"],
-        #                                                           wavenet_params["initial_filter_width"]),
-        #    sample_size=args.sample_size)
-        #valid_batch = valid_reader.dequeue(args.batch_size)
         if gc_enabled:
             gc_id_batch = reader.dequeue_gc(args.batch_size)
         else:
@@ -283,9 +270,6 @@ def main():
                     l2_regularization_strength=args.l2_regularization_strength)
     print('constructing validation loss');
     sys.stdout.flush()
-    valid_loss, target_output, prediction = net.loss(input_batch=valid_batch,
-                    global_condition_batch=gc_id_batch,
-                    l2_regularization_strength=args.l2_regularization_strength)
 
     print('making optimizer');
     sys.stdout.flush()
@@ -303,6 +287,10 @@ def main():
     run_metadata = tf.RunMetadata()
     summaries = tf.summary.merge_all()
 
+    valid_input = tf.placeholder(dtype=tf.float32, shape=(1, None, 88));
+    valid_loss, valid_target_output, valid_prediction =net.loss(input_batch=valid_input,
+                    global_condition_batch=gc_id_batch,
+                    l2_regularization_strength=args.l2_regularization_strength)
     # Set up session
     sess = tf.Session(config=tf.ConfigProto(log_device_placement=False))
     init = tf.global_variables_initializer()
@@ -333,59 +321,55 @@ def main():
 
     step = None
     last_saved_step = saved_global_step
+
+    # load validation data
+    validation_audio = load_all_audio(data_dir + 'valid/');
+    num_valid_files = len(validation_audio);
     valid_loss_values = np.zeros((int(np.ceil(args.num_steps/50)),));
     vl_ind = 0;
     print('optimization time');
     sys.stdout.flush()
+    min_valid_loss = 1e10;
     try:
         for step in range(saved_global_step + 1, args.num_steps):
-            print('step', step);
-            sys.stdout.flush()
             start_time = time.time()
             if args.store_metadata and step % 50 == 0:
                 # Slow run that stores extra information for debugging.
-                print('Storing metadata')
-                sys.stdout.flush()
                 run_options = tf.RunOptions(
                     trace_level=tf.RunOptions.FULL_TRACE)
-                print('sess.run')
-                sys.stdout.flush()
                 summary, loss_value, _ = sess.run(
                     [summaries, train_loss, optim],
                     options=run_options,
                     run_metadata=run_metadata)
-                print('writing summary')
-                sys.stdout.flush()
                 writer.add_summary(summary, step)
                 writer.add_run_metadata(run_metadata,
                                         'step_{:04d}'.format(step))
-                #valid_loss_values[vl_ind] = sess.run(valid_loss);
-                #np.savez('results.npz', validation_loss=valid_loss_values);
-                #vl_ind += 1;
+                valid_losses_step = np.zeros((num_valid_files,));
+                for i in range(num_valid_files):
+                    audio_i = np.expand_dims(validation_audio[i], 0);
+                    valid_losses_step[i] = sess.run(valid_loss, {valid_input:audio_i});
+                valid_loss_value_step = np.mean(valid_losses_step);
+                valid_loss_values[vl_ind] = valid_loss_value_step
+                np.savez(logdir + 'validation.npz', validation_loss=valid_loss_values);
+                vl_ind += 1;
                 tl = timeline.Timeline(run_metadata.step_stats)
                 timeline_path = os.path.join(logdir, 'timeline.trace')
                 with open(timeline_path, 'w') as f:
                     f.write(tl.generate_chrome_trace_format(show_memory=True))
-                print('end if')
-                sys.stdout.flush()
+
+                if (valid_loss_value_step < min_valid_loss):
+                    min_valid_loss = valid_loss_value_step;
+                    save(saver, sess, logdir, step)
+                    last_saved_step = step
             else:
-                print('else', step);
-                sys.stdout.flush()
                 summary, loss_value, _ = sess.run([summaries, train_loss, optim])
-                print('1');
-                sys.stdout.flush()
                 writer.add_summary(summary, step)
-                print('2');
-                sys.stdout.flush()
 
             duration = time.time() - start_time
             print('step {:d} - loss = {:.3f}, ({:.3f} sec/step)'
                   .format(step, loss_value, duration))
             sys.stdout.flush()
 
-            if step % CHECKPOINT_EVERY == 0:
-                save(saver, sess, logdir, step)
-                last_saved_step = step
 
     except KeyboardInterrupt:
         # Introduce a line break after ^C is displayed so save message

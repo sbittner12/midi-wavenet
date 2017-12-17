@@ -413,7 +413,6 @@ class WaveNetModel(object):
                     output, current_layer = self._create_dilation_layer(
                         current_layer, layer_index, dilation,
                         global_condition_batch, output_width)
-                    exit()
                     outputs.append(output)
 
         with tf.name_scope('postprocessing'):
@@ -630,6 +629,7 @@ class WaveNetModel(object):
 
         The variables are all scoped to the given name.
         '''
+        print('input batch', input_batch.shape);
         with tf.name_scope(name):
             # We mu-law encode and quantize the input audioform.
             gc_embedding = self._embed_gc(global_condition_batch)
